@@ -1,0 +1,25 @@
+[package]
+name = "vesper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vesper — local coding agent (CLI)"
+
+[[bin]]
+name = "vesper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+rustyline.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+vesper-agent.workspace = true
+vesper-config.workspace = true
+vesper-llm.workspace = true
+vesper-memory.workspace = true
+vesper-tools.workspace = true

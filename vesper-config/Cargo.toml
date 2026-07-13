@@ -1,0 +1,12 @@
+[package]
+name = "vesper-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Layered config for Vesper"
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true

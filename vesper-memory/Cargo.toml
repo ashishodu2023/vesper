@@ -1,0 +1,11 @@
+[package]
+name = "vesper-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session + persistent project memory for Vesper"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
