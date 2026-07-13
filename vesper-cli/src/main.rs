@@ -12,7 +12,7 @@ use vesper_tools::{list_backups, restore_backup, scan_project, Workspace};
 #[derive(Parser, Debug)]
 #[command(
     name = "vesper",
-    about = "Vesper — local coding agent that stays on your machine",
+    about = "VESPER — Verified Editing System for Private Engineering Repos",
     version,
     propagate_version = true
 )]

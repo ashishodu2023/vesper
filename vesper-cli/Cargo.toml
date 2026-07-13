@@ -3,7 +3,7 @@ name = "vesper"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Vesper — local coding agent (CLI)"
+description = "VESPER — Verified Editing System for Private Engineering Repos"
 
 [[bin]]
 name = "vesper"

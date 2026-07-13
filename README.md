@@ -9,9 +9,11 @@
    ╚═══╝  ╚══════╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝
 ```
 
-**VESPER** is a local-first coding agent for your terminal — built in Rust.
+**VESPER** — **V**erified **E**diting **S**ystem for **P**rivate **E**ngineering **R**epos
 
-It reads your repo, walks the codebase, edits with diffs + backups, runs shell/git, and **auto-verifies** its own changes. Everything runs on your machine through [Ollama](https://ollama.com). No API keys. No cloud. No subscriptions.
+A local-first coding agent for your terminal — built in Rust.
+
+It reads your repo, walks the codebase, edits with diffs + backups, runs shell/git, and **auto-verifies** its own changes. Everything runs on your machine through [Ollama](https://ollama.com). No API keys. No cloud. No subscriptions. Your code never leaves the machine.
 
 ```bash
 vesper summarize              # walk key files and summarize the codebase
