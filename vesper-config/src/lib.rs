@@ -41,6 +41,35 @@ impl SessionMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Default::default(),
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     #[serde(default = "default_model")]
     pub model: String,
@@ -60,6 +89,11 @@ pub struct Config {
     pub num_predict: i32,
     #[serde(default = "default_keep_alive")]
     pub keep_alive: String,
+    /// MCP stdio plugin servers (tools exposed as `mcp_<server>_<tool>`).
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+    #[serde(default = "default_watch_interval")]
+    pub watch_interval: u64,
 }
 
 fn default_model() -> String {
@@ -83,6 +117,9 @@ fn default_num_predict() -> i32 {
 fn default_keep_alive() -> String {
     "30m".into()
 }
+fn default_watch_interval() -> u64 {
+    5
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -96,6 +133,8 @@ impl Default for Config {
             num_ctx: default_num_ctx(),
             num_predict: default_num_predict(),
             keep_alive: default_keep_alive(),
+            mcp_servers: Vec::new(),
+            watch_interval: default_watch_interval(),
         }
     }
 }
@@ -190,6 +229,8 @@ pub struct ConfigOverlay {
     pub num_ctx: Option<u32>,
     pub num_predict: Option<i32>,
     pub keep_alive: Option<String>,
+    pub mcp_servers: Option<Vec<McpServerConfig>>,
+    pub watch_interval: Option<u64>,
 }
 
 impl Config {
@@ -242,6 +283,12 @@ fn apply_file(cfg: &mut Config, path: &Path) -> Result<()> {
     if let Some(v) = o.keep_alive {
         cfg.keep_alive = v;
     }
+    if let Some(v) = o.mcp_servers {
+        cfg.mcp_servers = v;
+    }
+    if let Some(v) = o.watch_interval {
+        cfg.watch_interval = v;
+    }
     Ok(())
 }
 
@@ -276,6 +323,7 @@ pub fn set_key(workspace: &Path, key: &str, value: &str, project: bool) -> Resul
         "num_ctx" => overlay.num_ctx = Some(value.parse()?),
         "num_predict" => overlay.num_predict = Some(value.parse()?),
         "keep_alive" => overlay.keep_alive = Some(value.into()),
+        "watch_interval" => overlay.watch_interval = Some(value.parse()?),
         other => anyhow::bail!("unknown config key: {other}"),
     }
     fs::write(&path, serde_json::to_string_pretty(&overlay)?)?;

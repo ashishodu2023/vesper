@@ -1,0 +1,38 @@
+{
+  "name": "vesper",
+  "displayName": "VESPER",
+  "description": "Run the local VESPER coding agent from VS Code / Cursor",
+  "version": "0.1.0",
+  "publisher": "ashishodu2023",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:vesper.summarize",
+    "onCommand:vesper.fix",
+    "onCommand:vesper.run",
+    "onCommand:vesper.doctor"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vesper.summarize",
+        "title": "VESPER: Summarize Workspace"
+      },
+      {
+        "command": "vesper.fix",
+        "title": "VESPER: Fix (auto)"
+      },
+      {
+        "command": "vesper.run",
+        "title": "VESPER: Run Task…"
+      },
+      {
+        "command": "vesper.doctor",
+        "title": "VESPER: Doctor"
+      }
+    ]
+  }
+}

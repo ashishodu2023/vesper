@@ -1492,6 +1492,7 @@ dependencies = [
  "vesper-agent",
  "vesper-config",
  "vesper-llm",
+ "vesper-mcp",
  "vesper-memory",
  "vesper-tools",
 ]
@@ -1502,12 +1503,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures-util",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "vesper-config",
  "vesper-llm",
+ "vesper-mcp",
  "vesper-memory",
  "vesper-tools",
 ]
@@ -1535,6 +1538,19 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "vesper-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "vesper-config",
+ "vesper-llm",
 ]
 
 [[package]]

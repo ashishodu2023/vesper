@@ -12,6 +12,7 @@ pub fn tool_catalog(mode: SessionMode) -> String {
 - git_diff()
 - update_todos(items: string[]) # live checklist for multi-step work
 - remember(fact)                # persist a project fact
+- spawn_subagents(goals: string[], max_steps?)  # run parallel plan-mode explorers
 "#,
     );
     if mode != SessionMode::Plan {
@@ -48,6 +49,7 @@ impl ToolCall {
                 | "git_diff"
                 | "update_todos"
                 | "remember"
+                | "spawn_subagents"
         )
     }
 

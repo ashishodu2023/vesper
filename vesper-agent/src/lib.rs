@@ -12,8 +12,10 @@ use runtime::{
     execute_tool, is_mutating, needs_approval, preview_tool, AgentEvent as Ev, AgentOptions as Opts,
     ToolContext,
 };
+use std::sync::Arc;
 use vesper_config::SessionMode as Mode;
 use vesper_llm::{ChatMessage, ChatOptions, LlmClient};
+use vesper_mcp::McpHub;
 use vesper_memory::{ProjectMemory, SessionMemory};
 use vesper_tools::{build_repo_map, gather_codebase, list_checkpoints, scan_project, Workspace};
 
@@ -84,7 +86,7 @@ Rules:
     )
 }
 
-pub struct Agent<C: LlmClient> {
+pub struct Agent<C: LlmClient + Clone> {
     llm: C,
     workspace: Workspace,
     session: SessionMemory,
@@ -92,9 +94,12 @@ pub struct Agent<C: LlmClient> {
     pub mode: Mode,
     pub verify_command: Option<String>,
     todos: TodoState,
+    mcp: Arc<McpHub>,
+    /// Prevent nested spawn_subagents recursion.
+    subagent_depth: u8,
 }
 
-impl<C: LlmClient> Agent<C> {
+impl<C: LlmClient + Clone> Agent<C> {
     pub fn new(llm: C, workspace: Workspace) -> Self {
         let project_memory = ProjectMemory::load(workspace.root()).unwrap_or_default();
         Self {
@@ -105,7 +110,17 @@ impl<C: LlmClient> Agent<C> {
             mode: Mode::Ask,
             verify_command: None,
             todos: TodoState::default(),
+            mcp: Arc::new(McpHub::empty()),
+            subagent_depth: 0,
         }
+    }
+
+    pub fn set_mcp(&mut self, hub: McpHub) {
+        self.mcp = Arc::new(hub);
+    }
+
+    pub fn mcp(&self) -> &McpHub {
+        &self.mcp
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -350,6 +365,11 @@ Be concrete — name real files and symbols. No JSON. No fluff.
             messages.push(ChatMessage::system(map));
         }
 
+        let mcp_catalog = self.mcp.catalog_lines();
+        if !mcp_catalog.is_empty() {
+            messages.push(ChatMessage::system(mcp_catalog));
+        }
+
         // Short README seed only — enough for orientation, not a full re-read later.
         if let Ok(readme) = self.workspace.read_file("README.md").await {
             let excerpt: String = readme.chars().take(700).collect();
@@ -374,7 +394,8 @@ Be concrete — name real files and symbols. No JSON. No fluff.
         let mut failed_calls: Vec<String> = Vec::new();
         let mut informative_ok: u32 = 0;
         let chat_opts = self.llm.chat_options();
-        let tool_specs = ollama_tool_specs(options.mode);
+        let mut tool_specs = ollama_tool_specs(options.mode);
+        tool_specs.extend(self.mcp.ollama_specs());
         let mut prefer_native = true;
 
         loop {
@@ -556,7 +577,13 @@ Be concrete — name real files and symbols. No JSON. No fluff.
                         memory: &mut self.project_memory,
                         todos: &self.todos,
                     };
-                    let result = execute_tool(&mut ctx, &call).await;
+                    let result = if call.name == "spawn_subagents" {
+                        self.run_spawn_subagents(&call, &mut on_event).await
+                    } else if self.mcp.is_mcp_tool(&call.name) {
+                        self.mcp.call(&call.name, &call.args).await
+                    } else {
+                        execute_tool(&mut ctx, &call).await
+                    };
                     let (ok, output) = match result {
                         Ok(text) => (true, text),
                         Err(err) => (false, format!("error: {err:#}")),
@@ -682,6 +709,115 @@ fn summarize(s: &str) -> String {
 
 fn tool_fingerprint(call: &ToolCall) -> String {
     format!("{}:{}", call.name, call.args)
+}
+
+impl<C: LlmClient + Clone> Agent<C> {
+    async fn run_spawn_subagents(
+        &self,
+        call: &ToolCall,
+        _on_event: &mut impl FnMut(Ev),
+    ) -> Result<String> {
+        if self.subagent_depth > 0 {
+            anyhow::bail!("spawn_subagents refused inside a subagent (depth limit)");
+        }
+        let goals = parse_goals(&call.args)?;
+        if goals.is_empty() {
+            anyhow::bail!("spawn_subagents requires non-empty goals[]");
+        }
+        if goals.len() > 4 {
+            anyhow::bail!("spawn_subagents allows at most 4 parallel goals");
+        }
+
+        let futs = goals.into_iter().enumerate().map(|(i, goal)| {
+            let llm = self.llm.clone();
+            let root = self.workspace.root().to_path_buf();
+            async move {
+                let ws = Workspace::new(&root)?;
+                let mut child = Agent::new(llm, ws);
+                child.subagent_depth = 1;
+                let briefing = child.research_briefing(&goal).await?;
+                Ok::<_, anyhow::Error>((i + 1, goal, briefing))
+            }
+        });
+
+        let results = futures_util::future::join_all(futs).await;
+        let mut out = String::from("Subagent results:\n");
+        for r in results {
+            match r {
+                Ok((idx, goal, message)) => {
+                    out.push_str(&format!("\n### Subagent #{idx}: {goal}\n{message}\n"));
+                }
+                Err(e) => {
+                    out.push_str(&format!("\n### Subagent failed\n{e:#}\n"));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Lightweight parallel research — no nested tool loop (avoids recursive async types).
+    async fn research_briefing(&self, goal: &str) -> Result<String> {
+        let info = scan_project(self.workspace.root());
+        let listing = self
+            .workspace
+            .list_dir(".")
+            .await
+            .unwrap_or_default()
+            .join("\n");
+        let map = build_repo_map(&self.workspace, goal)
+            .await
+            .unwrap_or_default();
+        let readme = self
+            .workspace
+            .read_file("README.md")
+            .await
+            .ok()
+            .map(|r| r.chars().take(800).collect::<String>())
+            .unwrap_or_default();
+        let system = format!(
+            "You are a read-only Vesper research subagent.\n\
+             Workspace: {}\nProject: {}\nTop-level:\n{}\n{}\nREADME excerpt:\n{}\n\
+             Write a concise factual briefing (bullets). Name real files. No JSON. No edits.",
+            self.workspace.root().display(),
+            info.summary,
+            listing,
+            map,
+            readme
+        );
+        let messages = vec![
+            ChatMessage::system(system),
+            ChatMessage::user(goal),
+        ];
+        let reply = self
+            .llm
+            .chat_with_options(&messages, &self.llm.chat_options())
+            .await?;
+        Ok(match parse_action(&reply) {
+            AgentAction::Final { message } => message,
+            AgentAction::Tool(_) => reply.trim().to_string(),
+        })
+    }
+}
+
+fn parse_goals(args: &serde_json::Value) -> Result<Vec<String>> {
+    if let Some(arr) = args.get("goals").and_then(|v| v.as_array()) {
+        return Ok(arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect());
+    }
+    if let Some(s) = args.get("goals").and_then(|v| v.as_str()) {
+        return Ok(s
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect());
+    }
+    if let Some(s) = args.get("goal").and_then(|v| v.as_str()) {
+        return Ok(vec![s.to_string()]);
+    }
+    Ok(vec![])
 }
 
 async fn stream_chat<C: LlmClient>(

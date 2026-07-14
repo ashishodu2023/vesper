@@ -1,4 +1,5 @@
 mod repl;
+mod watch;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -12,6 +13,7 @@ thread_local! {
 use vesper_agent::{Agent, AgentEvent, AgentOptions, SessionMode, ToolCall};
 use vesper_config::{set_key, Config};
 use vesper_llm::{ChatOptions, LlmClient, OllamaClient};
+use vesper_mcp::McpHub;
 use vesper_tools::{
     list_backups, list_checkpoints, restore_backup, restore_checkpoint, scan_project, undo_last,
     Workspace,
@@ -66,10 +68,27 @@ enum Commands {
         #[arg(long)]
         max_steps: Option<u32>,
     },
+    /// Poll verify_command and auto-fix on failure
+    Watch {
+        #[arg(long)]
+        interval: Option<u64>,
+        #[arg(long, short = 'y')]
+        yes: bool,
+        #[arg(long)]
+        max_steps: Option<u32>,
+        /// Exit after one fail→fix cycle (success or failure)
+        #[arg(long)]
+        once: bool,
+    },
     /// Walk key source files and summarize the codebase
     Summarize {
         /// Optional focus (e.g. "agent loop", "CLI")
         focus: Vec<String>,
+    },
+    /// List / probe MCP plugin servers
+    Mcp {
+        #[command(subcommand)]
+        action: McpCmd,
     },
     /// Project summary
     Analyze,
@@ -136,6 +155,12 @@ enum CheckpointCmd {
     Undo,
 }
 
+#[derive(Subcommand, Debug)]
+enum McpCmd {
+    /// Show configured / connected MCP tools
+    List,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -168,6 +193,13 @@ async fn main() -> Result<()> {
     let mut agent = Agent::new(llm, workspace);
     agent.set_mode(cfg.mode);
     agent.verify_command = cfg.verify_command.clone();
+    if !cfg.mcp_servers.is_empty() {
+        let hub = McpHub::connect_all(&cfg.mcp_servers).await;
+        if !hub.is_empty() {
+            eprintln!("[vesper] mcp: {}", hub.summary());
+        }
+        agent.set_mcp(hub);
+    }
 
     match cli.command.unwrap_or(Commands::Chat) {
         Commands::Chat => {
@@ -232,6 +264,15 @@ async fn main() -> Result<()> {
                 .await?;
             eprintln!("\n[vesper] fix finished ({} steps)", result.steps);
             let _ = result;
+        }
+        Commands::Watch {
+            interval,
+            yes,
+            max_steps,
+            once,
+        } => {
+            let interval = interval.unwrap_or(cfg.watch_interval);
+            watch::run_watch(&mut agent, &cfg, interval, yes, max_steps, once).await?;
         }
         Commands::Summarize { focus } => {
             let focus = focus.join(" ");
@@ -369,6 +410,32 @@ async fn main() -> Result<()> {
                 println!("{}", undo_last(agent.workspace().root())?);
             }
         },
+        Commands::Mcp { action } => match action {
+            McpCmd::List => {
+                if cfg.mcp_servers.is_empty() {
+                    println!("(no mcp_servers in config)");
+                    println!("Add to ~/.vesper/config.json or .vesper/config.json:");
+                    println!(
+                        r#"  "mcp_servers": [{{"name":"example","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}}]"#
+                    );
+                } else {
+                    println!("configured:");
+                    for s in &cfg.mcp_servers {
+                        println!(
+                            "  {}  {} {}  enabled={}",
+                            s.name,
+                            s.command,
+                            s.args.join(" "),
+                            s.enabled
+                        );
+                    }
+                    println!("connected: {}", agent.mcp().summary());
+                    for t in agent.mcp().tools() {
+                        println!("  {} — {}", t.qualified, t.description);
+                    }
+                }
+            }
+        },
         Commands::Context => {
             println!("{}", agent.status_context().await?);
         }
@@ -387,6 +454,7 @@ async fn main() -> Result<()> {
             } else {
                 println!("  remote    : using remote Ollama (tools still run locally)");
             }
+            println!("  mcp       : {}", agent.mcp().summary());
             let client = OllamaClient::new(&cfg.ollama_host, &cfg.model);
             match client
                 .chat(&[vesper_llm::ChatMessage::user(
@@ -411,7 +479,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_options(
+pub(crate) fn build_options(
     mode: SessionMode,
     max_steps: u32,
     cfg: &Config,

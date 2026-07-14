@@ -177,6 +177,10 @@ pub async fn preview_tool(ws: &Workspace, call: &ToolCall) -> Result<String> {
 }
 
 pub fn needs_approval(mode: SessionMode, call: &ToolCall) -> bool {
+    // External plugins always confirm — unknown side effects.
+    if call.name.starts_with("mcp_") {
+        return true;
+    }
     if call.is_readonly() {
         return false;
     }

@@ -1,11 +1,12 @@
 use async_trait::async_trait;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use vesper_agent::{Agent, AgentOptions, SessionMode};
 use vesper_llm::{ChatMessage, LlmClient};
 use vesper_tools::Workspace;
 
+#[derive(Clone)]
 struct ScriptLlm {
-    replies: Mutex<Vec<String>>,
+    replies: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -34,11 +35,11 @@ async fn tool_loop_lists_and_finishes() {
     std::fs::write(dir.join("hello.txt"), "hi from vesper").unwrap();
 
     let llm = ScriptLlm {
-        replies: Mutex::new(vec![
+        replies: Arc::new(Mutex::new(vec![
             r#"{"action":"tool","name":"list_dir","args":{"path":"."}}"#.into(),
             r#"{"action":"tool","name":"read_file","args":{"path":"hello.txt"}}"#.into(),
             r#"{"action":"final","message":"Found hello.txt with hi from vesper"}"#.into(),
-        ]),
+        ])),
     };
     let ws = Workspace::new(&dir).unwrap();
     let mut agent = Agent::new(llm, ws);

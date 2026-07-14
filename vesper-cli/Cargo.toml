@@ -21,5 +21,6 @@ tracing-subscriber.workspace = true
 vesper-agent.workspace = true
 vesper-config.workspace = true
 vesper-llm.workspace = true
+vesper-mcp.workspace = true
 vesper-memory.workspace = true
 vesper-tools.workspace = true

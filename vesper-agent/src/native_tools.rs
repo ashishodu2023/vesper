@@ -48,6 +48,17 @@ pub fn ollama_tool_specs(mode: SessionMode) -> Vec<ToolSpec> {
             "Persist a project fact",
             obj(&[("fact", str_prop("fact text"))], &["fact"]),
         ),
+        tool(
+            "spawn_subagents",
+            "Run multiple research agents in parallel (plan/readonly). Pass short focused goals.",
+            obj(
+                &[
+                    ("goals", arr_str("list of research goals")),
+                    ("max_steps", num_prop("optional steps per child, default 6")),
+                ],
+                &["goals"],
+            ),
+        ),
     ];
 
     if mode != SessionMode::Plan {

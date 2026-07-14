@@ -1,0 +1,15 @@
+[package]
+name = "vesper-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP stdio client host for VESPER"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+vesper-config.workspace = true
+vesper-llm.workspace = true

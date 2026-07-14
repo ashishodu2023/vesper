@@ -9,7 +9,7 @@ use vesper_tools::{list_checkpoints, undo_last, Workspace};
 
 use crate::{print_event, prompt_approval};
 
-pub async fn run_repl<C: LlmClient>(agent: &mut Agent<C>, cfg: &Config) -> Result<()> {
+pub async fn run_repl<C: LlmClient + Clone>(agent: &mut Agent<C>, cfg: &Config) -> Result<()> {
     print_banner(agent, cfg);
 
     let mut rl = DefaultEditor::new()?;
@@ -114,7 +114,7 @@ fn needs_prompt(mode: SessionMode, call: &vesper_agent::ToolCall) -> bool {
     }
 }
 
-fn print_banner<C: LlmClient>(agent: &Agent<C>, cfg: &Config) {
+fn print_banner<C: LlmClient + Clone>(agent: &Agent<C>, cfg: &Config) {
     println!(
         r#"
  ██╗   ██╗███████╗███████╗██████╗ ███████╗██████╗
@@ -142,7 +142,7 @@ fn print_banner<C: LlmClient>(agent: &Agent<C>, cfg: &Config) {
     println!("\nType a task, or /help. Use /workspace <path> to switch repos.\n");
 }
 
-async fn handle_slash<C: LlmClient>(
+async fn handle_slash<C: LlmClient + Clone>(
     agent: &mut Agent<C>,
     cfg: &Config,
     line: &str,

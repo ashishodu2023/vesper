@@ -7,6 +7,7 @@ members = [
     "vesper-llm",
     "vesper-memory",
     "vesper-config",
+    "vesper-mcp",
 ]
 
 [workspace.package]
@@ -33,5 +34,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 vesper-agent = { path = "vesper-agent" }
 vesper-config = { path = "vesper-config" }
 vesper-llm = { path = "vesper-llm" }
+vesper-mcp = { path = "vesper-mcp" }
 vesper-memory = { path = "vesper-memory" }
 vesper-tools = { path = "vesper-tools" }
