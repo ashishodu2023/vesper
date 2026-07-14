@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::sync::Mutex;
 use vesper_config::SessionMode;
 use vesper_memory::ProjectMemory;
-use vesper_tools::{backup_file, unified_diff, Workspace};
+use vesper_tools::{backup_file, create_checkpoint, unified_diff, Workspace};
 
 pub type Approver = Box<dyn Fn(&ToolCall, &str) -> bool + Send + Sync>;
 
@@ -74,6 +74,13 @@ pub enum AgentEvent {
     },
     Final {
         message: String,
+    },
+    StreamToken {
+        token: String,
+    },
+    Checkpoint {
+        id: usize,
+        label: String,
     },
 }
 
@@ -212,6 +219,7 @@ pub async fn execute_tool(ctx: &mut ToolContext<'_>, call: &ToolCall) -> Result<
                 .arg_str("content")
                 .or_else(|| call.arg_str("contents"))
                 .ok_or_else(|| anyhow::anyhow!("write_file requires content"))?;
+            let _ = create_checkpoint(ws.root(), &format!("before write {path}"), &[path.clone()]);
             if let Ok(abs) = ws.resolve_for_write(&path) {
                 let _ = backup_file(ws.root(), &abs)?;
             }
@@ -230,16 +238,30 @@ pub async fn execute_tool(ctx: &mut ToolContext<'_>, call: &ToolCall) -> Result<
                 .arg_str("new_string")
                 .or_else(|| call.arg_str("new"))
                 .ok_or_else(|| anyhow::anyhow!("str_replace requires new_string"))?;
-            if let Ok(abs) = ws.resolve(&path) {
-                let _ = backup_file(ws.root(), &abs)?;
+            let _ = create_checkpoint(ws.root(), &format!("before edit {path}"), &[path.clone()]);
+            match ws.str_replace(&path, &old, &new).await {
+                Ok(msg) => Ok(msg),
+                Err(err) => {
+                    // Edit retry: re-read file and try a softened unique match.
+                    let content = ws.read_file(&path).await.unwrap_or_default();
+                    if let Some(fixed_old) = soften_old_string(&content, &old) {
+                        let msg = ws.str_replace(&path, &fixed_old, &new).await?;
+                        Ok(format!("{msg} (auto-retried with normalized match)"))
+                    } else {
+                        let excerpt: String = content.chars().take(1200).collect();
+                        Err(anyhow::anyhow!(
+                            "{err:#}\n\nFILE_EXCERPT {path}:\n{excerpt}\n\nRe-read and craft a unique old_string from this file."
+                        ))
+                    }
+                }
             }
-            ws.str_replace(path, &old, &new).await
         }
         "multi_str_replace" => {
             let path = call
                 .arg_str("path")
                 .ok_or_else(|| anyhow::anyhow!("multi_str_replace requires path"))?;
             let edits = parse_edits(&call.args)?;
+            let _ = create_checkpoint(ws.root(), &format!("before multi-edit {path}"), &[path.clone()]);
             if let Ok(abs) = ws.resolve(&path) {
                 let _ = backup_file(ws.root(), &abs)?;
             }
@@ -249,6 +271,7 @@ pub async fn execute_tool(ctx: &mut ToolContext<'_>, call: &ToolCall) -> Result<
             let path = call
                 .arg_str("path")
                 .ok_or_else(|| anyhow::anyhow!("delete_file requires path"))?;
+            let _ = create_checkpoint(ws.root(), &format!("before delete {path}"), &[path.clone()]);
             if let Ok(abs) = ws.resolve(&path) {
                 let _ = backup_file(ws.root(), &abs)?;
             }
@@ -353,4 +376,35 @@ pub fn is_mutating(name: &str) -> bool {
             | "git_commit"
             | "git_push"
     )
+}
+
+/// Normalize whitespace / try unique line-based match when exact old_string fails.
+fn soften_old_string(content: &str, old: &str) -> Option<String> {
+    if content.contains(old) {
+        return Some(old.to_string());
+    }
+    let compact = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let old_c = compact(old);
+    if old_c.len() < 8 {
+        return None;
+    }
+    // Find a unique window in content whose compacted form contains old_c or equals it.
+    for line in content.lines() {
+        if compact(line) == old_c {
+            // ensure unique
+            let hits = content
+                .lines()
+                .filter(|l| compact(l) == old_c)
+                .count();
+            if hits == 1 {
+                return Some(line.to_string());
+            }
+        }
+    }
+    // Try multiline: collapse whitespace in file and map back is hard — skip.
+    None
 }

@@ -1,3 +1,4 @@
+mod native_tools;
 mod protocol;
 mod runtime;
 
@@ -6,14 +7,15 @@ pub use runtime::{AgentEvent, AgentOptions, RunResult, TodoState};
 pub use vesper_config::SessionMode;
 
 use anyhow::Result;
+use native_tools::ollama_tool_specs;
 use runtime::{
     execute_tool, is_mutating, needs_approval, preview_tool, AgentEvent as Ev, AgentOptions as Opts,
     ToolContext,
 };
 use vesper_config::SessionMode as Mode;
-use vesper_llm::{ChatMessage, LlmClient};
+use vesper_llm::{ChatMessage, ChatOptions, LlmClient};
 use vesper_memory::{ProjectMemory, SessionMemory};
-use vesper_tools::{gather_codebase, scan_project, Workspace};
+use vesper_tools::{build_repo_map, gather_codebase, list_checkpoints, scan_project, Workspace};
 
 const CHAT_SYSTEM: &str = r#"You are Vesper, a local coding agent.
 Be concise, precise, and practical. Prefer actionable steps over fluff.
@@ -131,6 +133,14 @@ impl<C: LlmClient> Agent<C> {
         self.session.clear();
     }
 
+    /// Switch the active project root (e.g. from REPL `/workspace`).
+    pub fn set_workspace(&mut self, workspace: Workspace) {
+        self.project_memory = ProjectMemory::load(workspace.root()).unwrap_or_default();
+        self.workspace = workspace;
+        self.session.clear();
+        self.todos = TodoState::default();
+    }
+
     pub async fn ask(&mut self, prompt: &str) -> Result<String> {
         let mut messages = vec![ChatMessage::system(CHAT_SYSTEM)];
         let info = scan_project(self.workspace.root());
@@ -154,7 +164,24 @@ impl<C: LlmClient> Agent<C> {
             });
         }
         messages.push(ChatMessage::user(prompt));
-        let reply = self.llm.chat(&messages).await?;
+        let chat_opts = self.llm.chat_options();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let reply_fut = self.llm.chat_streaming(&messages, &chat_opts, tx);
+        tokio::pin!(reply_fut);
+        let reply = loop {
+            tokio::select! {
+                result = &mut reply_fut => break result?,
+                Some(tok) = rx.recv() => {
+                    print!("{tok}");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+            }
+        };
+        while let Ok(tok) = rx.try_recv() {
+            print!("{tok}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+        println!();
         self.session.push("user", prompt);
         self.session.push("assistant", &reply);
         Ok(reply)
@@ -211,7 +238,8 @@ Be concrete — name real files and symbols. No JSON. No fluff.
             ChatMessage::system(system),
             ChatMessage::user(digest.prompt_block()),
         ];
-        let reply = self.llm.chat(&messages).await?;
+        let chat_opts = self.llm.chat_options();
+        let reply = stream_chat(&self.llm, &messages, &chat_opts, on_event).await?;
         let message = match parse_action(&reply) {
             AgentAction::Final { message } => message,
             AgentAction::Tool(_) => reply.trim().to_string(),
@@ -268,7 +296,8 @@ Be concrete — name real files and symbols. No JSON. No fluff.
             ChatMessage::system(system),
             ChatMessage::user(prompt),
         ];
-        let reply = self.llm.chat(&messages).await?;
+        let chat_opts = self.llm.chat_options();
+        let reply = stream_chat(&self.llm, &messages, &chat_opts, on_event).await?;
         let message = match parse_action(&reply) {
             AgentAction::Final { message } => message,
             AgentAction::Tool(_) => reply.trim().to_string(),
@@ -316,6 +345,11 @@ Be concrete — name real files and symbols. No JSON. No fluff.
             &listing,
         ))];
 
+        // Ranked repo map — reduce path hallucination (Claude-like orientation).
+        if let Ok(map) = build_repo_map(&self.workspace, prompt).await {
+            messages.push(ChatMessage::system(map));
+        }
+
         // Short README seed only — enough for orientation, not a full re-read later.
         if let Ok(readme) = self.workspace.read_file("README.md").await {
             let excerpt: String = readme.chars().take(700).collect();
@@ -339,6 +373,9 @@ Be concrete — name real files and symbols. No JSON. No fluff.
         let mut mutations = 0u32;
         let mut failed_calls: Vec<String> = Vec::new();
         let mut informative_ok: u32 = 0;
+        let chat_opts = self.llm.chat_options();
+        let tool_specs = ollama_tool_specs(options.mode);
+        let mut prefer_native = true;
 
         loop {
             if steps >= options.max_steps {
@@ -359,10 +396,51 @@ Be concrete — name real files and symbols. No JSON. No fluff.
             }
 
             on_event(Ev::Thinking { step: steps + 1 });
-            let raw = self.llm.chat(&messages).await?;
-            messages.push(ChatMessage::assistant(&raw));
 
-            match parse_action(&raw) {
+            // Prefer native Ollama tools when available; fall back to JSON protocol.
+            let action = if prefer_native {
+                match self
+                    .llm
+                    .chat_with_tools(&messages, &tool_specs, &chat_opts)
+                    .await
+                {
+                    Ok(outcome) if !outcome.tool_calls.is_empty() => {
+                        let tc = &outcome.tool_calls[0];
+                        if !outcome.content.is_empty() {
+                            messages.push(ChatMessage::assistant(&outcome.content));
+                        } else {
+                            messages.push(ChatMessage::assistant(format!(
+                                "{{\"action\":\"tool\",\"name\":\"{}\"}}",
+                                tc.name
+                            )));
+                        }
+                        AgentAction::Tool(ToolCall {
+                            name: tc.name.clone(),
+                            args: tc.arguments.clone(),
+                        })
+                    }
+                    Ok(outcome) => {
+                        let raw = outcome.content;
+                        messages.push(ChatMessage::assistant(&raw));
+                        parse_action(&raw)
+                    }
+                    Err(_) => {
+                        prefer_native = false;
+                        let raw = self
+                            .llm
+                            .chat_with_options(&messages, &chat_opts)
+                            .await?;
+                        messages.push(ChatMessage::assistant(&raw));
+                        parse_action(&raw)
+                    }
+                }
+            } else {
+                let raw = self.llm.chat_with_options(&messages, &chat_opts).await?;
+                messages.push(ChatMessage::assistant(&raw));
+                parse_action(&raw)
+            };
+
+            match action {
                 AgentAction::Final { message } => {
                     if mutations > 0 {
                         if let Some(cmd) = options.verify_command.clone() {
@@ -504,6 +582,16 @@ Be concrete — name real files and symbols. No JSON. No fluff.
                         ok,
                         output: truncate_for_event(&output),
                     });
+                    if ok && is_mutating(&call.name) {
+                        if let Ok(cps) = list_checkpoints(self.workspace.root()) {
+                            if let Some(cp) = cps.last() {
+                                on_event(Ev::Checkpoint {
+                                    id: cp.id,
+                                    label: cp.label.clone(),
+                                });
+                            }
+                        }
+                    }
                     tool_trace.push(format!(
                         "{} {} → {}",
                         if ok { "ok" } else { "err" },
@@ -594,6 +682,29 @@ fn summarize(s: &str) -> String {
 
 fn tool_fingerprint(call: &ToolCall) -> String {
     format!("{}:{}", call.name, call.args)
+}
+
+async fn stream_chat<C: LlmClient>(
+    llm: &C,
+    messages: &[ChatMessage],
+    opts: &ChatOptions,
+    on_event: &mut impl FnMut(Ev),
+) -> Result<String> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let reply_fut = llm.chat_streaming(messages, opts, tx);
+    tokio::pin!(reply_fut);
+    let reply = loop {
+        tokio::select! {
+            result = &mut reply_fut => break result?,
+            Some(tok) = rx.recv() => {
+                on_event(Ev::StreamToken { token: tok });
+            }
+        }
+    };
+    while let Ok(tok) = rx.try_recv() {
+        on_event(Ev::StreamToken { token: tok });
+    }
+    Ok(reply)
 }
 
 fn is_fast_question(prompt: &str) -> bool {

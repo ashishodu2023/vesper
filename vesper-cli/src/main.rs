@@ -2,12 +2,20 @@ mod repl;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::cell::Cell;
 use std::io::{self, Write};
 use std::path::PathBuf;
+
+thread_local! {
+    static STREAMED: Cell<bool> = const { Cell::new(false) };
+}
 use vesper_agent::{Agent, AgentEvent, AgentOptions, SessionMode, ToolCall};
 use vesper_config::{set_key, Config};
 use vesper_llm::{ChatOptions, LlmClient, OllamaClient};
-use vesper_tools::{list_backups, restore_backup, scan_project, Workspace};
+use vesper_tools::{
+    list_backups, list_checkpoints, restore_backup, restore_checkpoint, scan_project, undo_last,
+    Workspace,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,6 +92,11 @@ enum Commands {
         #[command(subcommand)]
         action: RestoreCmd,
     },
+    /// Edit checkpoints / undo
+    Checkpoint {
+        #[command(subcommand)]
+        action: CheckpointCmd,
+    },
     /// Workspace snapshot
     Context,
     /// Health check
@@ -112,6 +125,15 @@ enum MemoryCmd {
 enum RestoreCmd {
     List,
     Apply { id: usize },
+}
+
+#[derive(Subcommand, Debug)]
+enum CheckpointCmd {
+    List,
+    /// Restore a checkpoint by id
+    Apply { id: usize },
+    /// Undo the last mutating edit checkpoint
+    Undo,
 }
 
 #[tokio::main]
@@ -156,7 +178,7 @@ async fn main() -> Result<()> {
             if prompt.trim().is_empty() {
                 anyhow::bail!("usage: vesper ask \"question\"");
             }
-            println!("{}", agent.ask(&prompt).await?);
+            let _ = agent.ask(&prompt).await?;
         }
         Commands::Run {
             prompt,
@@ -323,6 +345,30 @@ async fn main() -> Result<()> {
                 println!("{}", restore_backup(agent.workspace().root(), id)?);
             }
         },
+        Commands::Checkpoint { action } => match action {
+            CheckpointCmd::List => {
+                let items = list_checkpoints(agent.workspace().root())?;
+                if items.is_empty() {
+                    println!("(no checkpoints)");
+                } else {
+                    for c in items {
+                        println!(
+                            "#{}  {}  ({} file(s), ts={})",
+                            c.id,
+                            c.label,
+                            c.files.len(),
+                            c.timestamp
+                        );
+                    }
+                }
+            }
+            CheckpointCmd::Apply { id } => {
+                println!("{}", restore_checkpoint(agent.workspace().root(), id)?);
+            }
+            CheckpointCmd::Undo => {
+                println!("{}", undo_last(agent.workspace().root())?);
+            }
+        },
         Commands::Context => {
             println!("{}", agent.status_context().await?);
         }
@@ -336,6 +382,11 @@ async fn main() -> Result<()> {
                 "  verify    : {}",
                 cfg.verify_command.as_deref().unwrap_or("(none)")
             );
+            if cfg.ollama_host.contains("127.0.0.1") || cfg.ollama_host.contains("localhost") {
+                println!("  hint      : set VESPER_OLLAMA_URL to your GPU box for remote inference");
+            } else {
+                println!("  remote    : using remote Ollama (tools still run locally)");
+            }
             let client = OllamaClient::new(&cfg.ollama_host, &cfg.model);
             match client
                 .chat(&[vesper_llm::ChatMessage::user(
@@ -456,8 +507,21 @@ pub(crate) fn print_event(ev: &AgentEvent) {
                 eprintln!("{preview}");
             }
         }
+        AgentEvent::StreamToken { token } => {
+            STREAMED.with(|s| s.set(true));
+            print!("{token}");
+            let _ = io::stdout().flush();
+        }
         AgentEvent::Final { message } => {
-            println!("\n{message}");
+            let streamed = STREAMED.with(|s| s.replace(false));
+            if streamed {
+                println!();
+            } else {
+                println!("{message}");
+            }
+        }
+        AgentEvent::Checkpoint { id, label } => {
+            eprintln!("[vesper] checkpoint #{id}: {label}");
         }
     }
 }

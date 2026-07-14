@@ -8,8 +8,10 @@ description = "LLM backends for Vesper (Ollama and OpenAI-compatible APIs)"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true

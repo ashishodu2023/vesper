@@ -34,12 +34,17 @@ vesper                        # interactive REPL
 ## Features
 
 - **Codebase walk + summarize** — deterministic file gathering, then LLM synthesis (`vesper summarize`)
+- **Streaming replies** — tokens print live for summarize / ask / fast answers
+- **Native Ollama tools** — structured tool calls when the model supports them; JSON protocol fallback otherwise
+- **Repo map** — ranked file context pack to reduce path hallucination
+- **Edit retry** — `str_replace` soft-matches whitespace when the exact string misses
 - **Tool-calling agent** — read, grep, find, edit, multi-edit, shell, git, todos, memory
 - **Session modes** — `plan` (research only) / `ask` (confirm edits) / `auto` (routine edits fly)
-- **Diffs + backups** — mutating tools preview changes; copies land in `.vesper/backups/`
+- **Diffs + backups + checkpoints** — mutating tools preview changes; `.vesper/backups/` + `/undo` / `vesper checkpoint`
 - **Auto-verify** — set `verify_command` (e.g. `cargo test`) and VESPER re-checks after edits
+- **Remote Ollama** — point `VESPER_OLLAMA_URL` at a GPU box; tools still run locally
 - **Project memory** — persistent facts in `.vesper/memory.json`
-- **Interactive REPL** — `vesper` with `/summarize`, `/mode`, `/remember`, …
+- **Interactive REPL** — `vesper` with `/summarize`, `/workspace`, `/undo`, `/mode`, …
 
 ## Install
 
@@ -57,6 +62,13 @@ vesper doctor
 vesper init
 ```
 
+Point at a remote GPU host (tools stay on your Mac):
+
+```bash
+export VESPER_OLLAMA_URL=http://192.168.x.x:11434
+vesper doctor
+```
+
 ## Usage
 
 | Command | What it does |
@@ -65,21 +77,24 @@ vesper init
 | `vesper summarize` | Walk key source files and summarize |
 | `vesper run "…"` | One-shot tool agent |
 | `vesper fix -y` | Diagnose/fix build-test failures |
-| `vesper ask "…"` | Chat only (no tools) |
+| `vesper ask "…"` | Chat only (no tools; streams) |
 | `vesper analyze` | Languages / manifests / suggested verify |
 | `vesper models` | List Ollama models |
 | `vesper init` | Create `.vesper/` project config |
 | `vesper config show` / `set` | Layered config |
 | `vesper memory …` | Project facts |
 | `vesper restore …` | Restore file backups |
-| `vesper doctor` | Health check |
+| `vesper checkpoint list\|apply\|undo` | Edit checkpoints |
+| `vesper doctor` | Health check (+ remote hint) |
 
 ### REPL
 
 ```text
 vesper (ask) › summarize this codebase
-vesper (ask) › /mode auto
+vesper (ask) › /workspace ~/Documents/cortexops
 vesper (ask) › /summarize agent loop
+vesper (ask) › /undo
+vesper (ask) › /mode auto
 vesper (ask) › /help
 ```
 
@@ -112,8 +127,8 @@ Env overrides: `VESPER_MODEL`, `VESPER_OLLAMA_URL`, `VESPER_WORKSPACE`
 vesper/
 ├── vesper-cli       # VESPER binary + REPL
 ├── vesper-agent     # tool loop, summarize, verify
-├── vesper-tools     # sandboxed FS / shell / git / gather
-├── vesper-llm       # Ollama client
+├── vesper-tools     # sandboxed FS / shell / git / gather / repo map / checkpoints
+├── vesper-llm       # Ollama client (stream + native tools)
 ├── vesper-memory    # session + project facts
 └── vesper-config    # layered settings
 ```
@@ -124,6 +139,13 @@ vesper/
 - [Ollama](https://ollama.com) with a coding model  
   - Laptop: `qwen2.5-coder:7b`  
   - NVIDIA GPU (e.g. 4060 Ti): `qwen2.5-coder:14b` or larger
+
+## Not yet (honest roadmap)
+
+- MCP / plugin hosts
+- Parallel subagents
+- IDE extension
+- Local models still lag Claude/Codex on hard multi-file refactors — VESPER wins on privacy + verify loop
 
 ## License
 

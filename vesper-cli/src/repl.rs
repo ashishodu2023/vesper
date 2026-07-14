@@ -1,9 +1,11 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::path::PathBuf;
 use vesper_agent::{Agent, AgentOptions, SessionMode};
-use vesper_config::Config;
+use vesper_config::{Config, Config as VesperConfig};
 use vesper_llm::LlmClient;
+use vesper_tools::{list_checkpoints, undo_last, Workspace};
 
 use crate::{print_event, prompt_approval};
 
@@ -18,7 +20,8 @@ pub async fn run_repl<C: LlmClient>(agent: &mut Agent<C>, cfg: &Config) -> Resul
     let _ = rl.load_history(&history);
 
     loop {
-        let prompt = format!("vesper ({}) › ", agent.mode.as_str());
+        let short_ws = short_workspace(agent.workspace().root());
+        let prompt = format!("vesper ({}/{}) › ", agent.mode.as_str(), short_ws);
         let line = match rl.readline(&prompt) {
             Ok(l) => l,
             Err(ReadlineError::Interrupted) => continue,
@@ -30,6 +33,19 @@ pub async fn run_repl<C: LlmClient>(agent: &mut Agent<C>, cfg: &Config) -> Resul
             continue;
         }
         let _ = rl.add_history_entry(line);
+
+        // Catch shell commands pasted into the REPL
+        if looks_like_shell_command(line) {
+            eprintln!(
+                "[vesper] that looks like a shell command.\n\
+                 Inside this chat, use:\n\
+                   /workspace /path/to/repo\n\
+                   /summarize\n\
+                 Or exit (/exit) and run in your terminal:\n\
+                   {line}"
+            );
+            continue;
+        }
 
         if line.starts_with('/') {
             if handle_slash(agent, cfg, line).await? {
@@ -72,6 +88,22 @@ pub async fn run_repl<C: LlmClient>(agent: &mut Agent<C>, cfg: &Config) -> Resul
     Ok(())
 }
 
+fn looks_like_shell_command(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("vesper ")
+        || t.starts_with("vesper\t")
+        || t.starts_with("cargo ")
+        || t.starts_with("cd ")
+        || t.starts_with("ollama ")
+}
+
+fn short_workspace(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(".")
+        .to_string()
+}
+
 fn needs_prompt(mode: SessionMode, call: &vesper_agent::ToolCall) -> bool {
     if call.is_readonly() {
         return false;
@@ -107,7 +139,7 @@ fn print_banner<C: LlmClient>(agent: &Agent<C>, cfg: &Config) {
             .or(cfg.verify_command.as_deref())
             .unwrap_or("(none — run: vesper init)")
     );
-    println!("\nType a task, or /help. Ctrl-D to exit.\n");
+    println!("\nType a task, or /help. Use /workspace <path> to switch repos.\n");
 }
 
 async fn handle_slash<C: LlmClient>(
@@ -124,7 +156,10 @@ async fn handle_slash<C: LlmClient>(
             println!(
                 r#"Commands:
   /help                 this help
+  /workspace [path]     show or switch project root
   /summarize [focus]    walk key files and summarize codebase
+  /undo                 restore last edit checkpoint
+  /checkpoints          list edit checkpoints
   /mode [plan|ask|auto] show or set session mode
   /new                  clear conversation
   /remember <fact>      persist project fact
@@ -135,13 +170,49 @@ async fn handle_slash<C: LlmClient>(
 "#
             );
         }
+        "/undo" => match undo_last(agent.workspace().root()) {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => println!("{e}"),
+        },
+        "/checkpoints" => {
+            match list_checkpoints(agent.workspace().root()) {
+                Ok(items) if items.is_empty() => println!("(no checkpoints)"),
+                Ok(items) => {
+                    for c in items {
+                        println!("#{}  {}  ({} files)", c.id, c.label, c.files.len());
+                    }
+                }
+                Err(e) => println!("{e}"),
+            }
+        }
+        "/workspace" | "/ws" => {
+            if rest.is_empty() {
+                println!("workspace = {}", agent.workspace().root().display());
+            } else {
+                let path = expand_path(rest);
+                let ws = Workspace::new(&path)
+                    .with_context(|| format!("invalid workspace: {}", path.display()))?;
+                // Reload project verify hint if present
+                let layered = VesperConfig::load_layered(ws.root()).unwrap_or_else(|_| cfg.clone());
+                agent.verify_command = layered.verify_command.clone();
+                agent.set_mode(layered.mode);
+                let root = ws.root().display().to_string();
+                agent.set_workspace(ws);
+                println!("workspace → {root}");
+                println!("(session cleared; mode={})", agent.mode.as_str());
+            }
+        }
         "/summarize" => {
             let focus = if rest.is_empty() { None } else { Some(rest) };
             match agent
                 .summarize_codebase(focus, &mut |ev| print_event(&ev))
                 .await
             {
-                Ok(r) => eprintln!("[vesper] summarized {} files", r.steps),
+                Ok(r) => eprintln!(
+                    "[vesper] summarized {} files under {}",
+                    r.steps,
+                    agent.workspace().root().display()
+                ),
                 Err(e) => eprintln!("[vesper] error: {e:#}"),
             }
         }
@@ -201,6 +272,21 @@ async fn handle_slash<C: LlmClient>(
         other => println!("unknown command: {other} (try /help)"),
     }
     Ok(false)
+}
+
+fn expand_path(raw: &str) -> PathBuf {
+    let raw = raw.trim().trim_matches('"').trim_matches('\'');
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    if raw == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    PathBuf::from(raw)
 }
 
 fn history_path() -> std::path::PathBuf {
