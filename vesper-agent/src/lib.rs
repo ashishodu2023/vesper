@@ -55,6 +55,7 @@ On EVERY turn output EXACTLY one JSON object (no markdown fences, no prose outsi
 
 1) Call a tool:
 {{"action":"tool","name":"list_dir","args":{{"path":"."}}}}
+{{"action":"tool","name":"spawn_subagents","args":{{"goals":["explore CLI","explore agent"]}}}}
 
 2) Finish:
 {{"action":"final","message":"your answer to the user"}}

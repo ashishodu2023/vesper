@@ -153,6 +153,22 @@ pub fn parse_action(raw: &str) -> AgentAction {
                     .unwrap_or_else(|| raw.trim().to_string());
                 return AgentAction::Final { message };
             }
+            // Shorthand models emit: {"action":"spawn_subagents","goals":[...]}
+            if is_known_tool_name(&action) {
+                let args = if let Some(a) = parsed.args {
+                    a
+                } else if let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(&json) {
+                    map.remove("action");
+                    map.remove("name");
+                    Value::Object(map)
+                } else {
+                    Value::Object(Default::default())
+                };
+                return AgentAction::Tool(ToolCall {
+                    name: action,
+                    args,
+                });
+            }
         }
         if let Ok(v) = serde_json::from_str::<Value>(&json) {
             if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
@@ -169,11 +185,57 @@ pub fn parse_action(raw: &str) -> AgentAction {
                     });
                 }
             }
+            // {"action":"<tool_name>", ...fields as args}
+            if let Some(action) = v.get("action").and_then(|a| a.as_str()) {
+                let action = action.to_lowercase();
+                if is_known_tool_name(&action) {
+                    let args = if let Some(a) = v
+                        .get("args")
+                        .or_else(|| v.get("arguments"))
+                        .cloned()
+                    {
+                        a
+                    } else if let Value::Object(map) = &v {
+                        let mut map = map.clone();
+                        map.remove("action");
+                        Value::Object(map)
+                    } else {
+                        Value::Object(Default::default())
+                    };
+                    return AgentAction::Tool(ToolCall {
+                        name: action,
+                        args,
+                    });
+                }
+            }
         }
     }
     AgentAction::Final {
         message: raw.trim().to_string(),
     }
+}
+
+fn is_known_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "list_dir"
+            | "read_file"
+            | "find_files"
+            | "grep"
+            | "git_status"
+            | "git_diff"
+            | "update_todos"
+            | "remember"
+            | "spawn_subagents"
+            | "write_file"
+            | "str_replace"
+            | "multi_str_replace"
+            | "delete_file"
+            | "run_shell"
+            | "git_add"
+            | "git_commit"
+            | "git_push"
+    ) || name.starts_with("mcp_")
 }
 
 fn extract_json_object(s: &str) -> Option<String> {
@@ -241,6 +303,23 @@ mod tests {
         match parse_action(raw) {
             AgentAction::Tool(c) => assert_eq!(c.name, "list_dir"),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn accepts_action_as_tool_name_shorthand() {
+        let raw = r#"{
+  "action": "spawn_subagents",
+  "goals": ["explore cli", "explore agent"],
+  "max_steps": 6
+}"#;
+        match parse_action(raw) {
+            AgentAction::Tool(c) => {
+                assert_eq!(c.name, "spawn_subagents");
+                let goals = c.args.get("goals").and_then(|v| v.as_array()).unwrap();
+                assert_eq!(goals.len(), 2);
+            }
+            other => panic!("expected tool, got {other:?}"),
         }
     }
 }
